@@ -1,0 +1,78 @@
+name: Save ChatGPT Note
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "ChatGPTに渡すプロンプト（要約・整形指示など）"
+        required: true
+        default: "今日の学びをMarkdownで箇条書き要約して。"
+  schedule:
+    # 毎日09:00(JST)に実行（GitHubはUTC動作のため 0:00=JST09:00）
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: write  # GITHUB_TOKENでpushできるように
+
+jobs:
+  run-and-commit:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: "gpt-4o-mini" # 必要に応じて変更
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Generate and append markdown via OpenAI API
+        run: |
+          python - << 'PY'
+          import os, json, datetime, pathlib, requests
+
+          api_key = os.environ["OPENAI_API_KEY"]
+          model   = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+          # 手動実行のときは入力prompt、スケジュール時はデフォルト
+          event_name = "${{ github.event_name }}"
+          prompt = "${{ github.event.inputs.prompt }}" if event_name=="workflow_dispatch" else "今日の学びをMarkdownで箇条書き要約して。"
+
+          url = "https://api.openai.com/v1/chat/completions"
+          headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+          payload = {
+            "model": model,
+            "messages": [
+              {"role": "system", "content": "You are a helpful assistant. Output in Markdown. 見出し→箇条書き5点→次のアクション3件→用語メモの順で出力してください。"},
+              {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7
+          }
+          r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
+          r.raise_for_status()
+          content = r.json()["choices"][0]["message"]["content"].strip()
+
+          today = datetime.date.today().strftime("%Y-%m-%d")
+          now   = datetime.datetime.now().strftime("%H:%M")
+          notes_dir = pathlib.Path("notes")
+          notes_dir.mkdir(parents=True, exist_ok=True)
+          path = notes_dir / f"{today}.md"
+
+          with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n\n## {now}\n\n")
+            f.write(content)
+            f.write("\n")
+
+          print(f"Wrote: {path}")
+          PY
+
+      - name: Commit and Push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add notes/*.md
+          git commit -m "chore: append note $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes to commit"
+          git push
